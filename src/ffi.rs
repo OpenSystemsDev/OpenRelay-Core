@@ -1,458 +1,185 @@
-use crate::clipboard::ClipboardManager;
-use crate::device_manager::{DeviceManager, DeviceManagerEvent};
 use crate::encryption::EncryptionService;
-use crate::models::{ClipboardData, ClipboardFormat};
-use crate::network::{NetworkCommand, NetworkService};
-use libc::{c_char, c_int, size_t};
-use log::{error, info};
-use once_cell::sync::OnceCell;
-use serde::{Deserialize, Serialize};
-use std::ffi::{CStr, CString};
-use std::ptr;
-use std::sync::Arc;
-use tokio::runtime::Runtime;
-use tokio::sync::{mpsc, oneshot};
+use std::slice;
 
-// Global runtime
-static RUNTIME: OnceCell<Runtime> = OnceCell::new();
+// Global encryption service
+static mut ENCRYPTION_SERVICE: Option<EncryptionService> = None;
 
-// Global channels
-static CLIPBOARD_TX: OnceCell<mpsc::Sender<ClipboardData>> = OnceCell::new();
-static NETWORK_TX: OnceCell<mpsc::Sender<NetworkCommand>> = OnceCell::new();
-
-// Callback function types
-type ClipboardChangedCallback = extern "C" fn(*const c_char, *const u8, size_t);
-type PairingRequestCallback = extern "C" fn(*const c_char, *const c_char, *const c_char, c_int, *const c_char) -> c_int;
-type DeviceAddedCallback = extern "C" fn(*const c_char, *const c_char, *const c_char, c_int);
-type DeviceRemovedCallback = extern "C" fn(*const c_char);
-
-// Callback storage
-static mut CLIPBOARD_CHANGED_CALLBACK: Option<ClipboardChangedCallback> = None;
-static mut PAIRING_REQUEST_CALLBACK: Option<PairingRequestCallback> = None;
-static mut DEVICE_ADDED_CALLBACK: Option<DeviceAddedCallback> = None;
-static mut DEVICE_REMOVED_CALLBACK: Option<DeviceRemovedCallback> = None;
-
-// Helper to convert Rust string to C string
-fn to_c_string(s: &str) -> *const c_char {
-    CString::new(s).unwrap_or_default().into_raw() as *const c_char
-}
-
-#[derive(Serialize, Deserialize)]
-struct JsonClipboardData {
-    format: String,
-    text_data: Option<String>,
-    binary_length: usize,
-    timestamp: u64,
-}
-
-// Initialize the library
+/// Initialize the encryption service
+/// 
+/// Returns 0 on success, non-zero on error
 #[unsafe(no_mangle)]
-pub extern "C" fn openrelay_init() -> c_int {
-    // Initialize logger
-    env_logger::init();
-    
-    // Create runtime
-    let runtime = match Runtime::new() {
-        Ok(rt) => rt,
-        Err(e) => {
-            error!("Failed to create runtime: {}", e);
-            return -1;
-        }
-    };
-    
-    let _ = RUNTIME.set(runtime);
-    
-    // Success
+pub extern "C" fn encryption_init() -> i32 {
+    unsafe {
+        ENCRYPTION_SERVICE = Some(EncryptionService::new());
+    }
     0
 }
 
-// Set the clipboard changed callback
+/// Generate a new encryption key
+/// 
+/// # Safety
+/// - The caller must call `encryption_free_buffer` on the returned pointer when done
+/// - The key_size parameter will be set to the size of the key in bytes
+/// 
+/// Returns a pointer to the key buffer, or null on error
 #[unsafe(no_mangle)]
-pub extern "C" fn openrelay_set_clipboard_changed_callback(callback: ClipboardChangedCallback) {
-    unsafe {
-        CLIPBOARD_CHANGED_CALLBACK = Some(callback);
+pub extern "C" fn encryption_generate_key(key_size: *mut usize) -> *mut u8 {
+    if key_size.is_null() {
+        return std::ptr::null_mut();
     }
-}
 
-// Set the pairing request callback
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_set_pairing_request_callback(callback: PairingRequestCallback) {
-    unsafe {
-        PAIRING_REQUEST_CALLBACK = Some(callback);
-    }
-}
-
-// Set the device added callback
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_set_device_added_callback(callback: DeviceAddedCallback) {
-    unsafe {
-        DEVICE_ADDED_CALLBACK = Some(callback);
-    }
-}
-
-// Set the device removed callback
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_set_device_removed_callback(callback: DeviceRemovedCallback) {
-    unsafe {
-        DEVICE_REMOVED_CALLBACK = Some(callback);
-    }
-}
-
-// Start the OpenRelay services
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_start() -> c_int {
-    let runtime = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => {
-            error!("Runtime not initialized");
-            return -1;
-        }
-    };
-    
-    // Start the OpenRelay services
-    runtime.block_on(async {
-        // Create encryption service
-        let encryption_service = Arc::new(EncryptionService::new());
-        
-        // Create device manager
-        let (device_manager, mut device_events_rx) = match DeviceManager::new() {
-            Ok((dm, rx)) => (Arc::new(dm), rx),
-            Err(e) => {
-                error!("Failed to create device manager: {}", e);
-                return -1;
+    // Generate a new key
+    let key_result = EncryptionService::generate_key();
+    match key_result {
+        Ok(key) => {
+            // Copy the key to a new buffer
+            let key_len = key.len();
+            let mut key_buffer = Vec::with_capacity(key_len);
+            key_buffer.extend_from_slice(&key);
+            
+            // Set the key size
+            unsafe {
+                *key_size = key_len;
             }
-        };
-        
-        // Create clipboard manager
-        let (clipboard_manager, mut clipboard_rx) = match ClipboardManager::new() {
-            Ok((cm, rx)) => (cm, rx),
-            Err(e) => {
-                error!("Failed to create clipboard manager: {}", e);
-                return -1;
-            }
-        };
-        
-        // Create a channel for receiving clipboard data from the network
-        let (clipboard_data_tx, mut clipboard_data_rx) = mpsc::channel(100);
-        
-        // Store global sender
-        let _ = CLIPBOARD_TX.set(clipboard_data_tx.clone());
-        
-        // Create network service
-        let (mut network_service, network_rx) = match NetworkService::new(
-            device_manager.clone(),
-            encryption_service.clone(),
-            clipboard_data_tx.clone(),
-        ) {
-            Ok((ns, rx)) => (ns, rx),
-            Err(e) => {
-                error!("Failed to create network service: {}", e);
-                return -1;
-            }
-        };
-        
-        // Store network command sender
-        let _ = NETWORK_TX.set(network_service.command_sender());
-        
-        // Start clipboard monitoring
-        if let Err(e) = clipboard_manager.start_monitoring() {
-            error!("Failed to start clipboard monitoring: {}", e);
-            return -1;
+            
+            // Transfer ownership to caller
+            let ptr = key_buffer.as_mut_ptr();
+            std::mem::forget(key_buffer);
+            ptr
         }
-        
-        // Start network service
-        if let Err(e) = network_service.start(network_rx).await {
-            error!("Failed to start network service: {}", e);
-            return -1;
-        }
-        
-        // Spawn task to handle clipboard changes
-        tokio::spawn(async move {
-            while let Some(data) = clipboard_rx.recv().await {
-                // Skip if we're updating the clipboard
-                match NETWORK_TX.get() {
-                    Some(tx) => {
-                        if let Err(e) = tx.send(NetworkCommand::SendClipboardData(data)).await {
-                            error!("Failed to send clipboard data: {}", e);
-                        }
-                    }
-                    None => {
-                        error!("Network sender not initialized");
-                    }
-                }
-            }
-        });
-        
-        // Spawn task to handle network clipboard data
-        tokio::spawn(async move {
-            while let Some(data) = clipboard_data_rx.recv().await {
-                // Convert to FFI-friendly format
-                let format = match data.format {
-                    ClipboardFormat::Text => "text/plain",
-                    ClipboardFormat::Image => "image/png",
-                    ClipboardFormat::Files => "files/paths",
-                };
-                
-                let json_data = JsonClipboardData {
-                    format: format.to_string(),
-                    text_data: data.text_data.clone(),
-                    binary_length: data.binary_data.as_ref().map_or(0, |d| d.len()),
-                    timestamp: data.timestamp,
-                };
-                
-                let json_str = match serde_json::to_string(&json_data) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to serialize clipboard data: {}", e);
-                        continue;
-                    }
-                };
-                
-                unsafe {
-                    if let Some(callback) = CLIPBOARD_CHANGED_CALLBACK {
-                        let c_str = to_c_string(&json_str);
-                        
-                        // For binary data
-                        let (ptr, len) = if let Some(bin) = &data.binary_data {
-                            (bin.as_ptr(), bin.len())
-                        } else {
-                            (ptr::null(), 0)
-                        };
-                        
-                        callback(c_str, ptr, len);
-                        
-                        // Free the C string
-                        let _ = CString::from_raw(c_str as *mut c_char);
-                    }
-                }
-                
-                // Update local clipboard
-                if let Err(e) = clipboard_manager.update_clipboard(&data) {
-                    error!("Failed to update clipboard: {}", e);
-                }
-            }
-        });
-        
-        // Spawn task to handle device events
-        tokio::spawn(async move {
-            while let Some(event) = device_events_rx.recv().await {
-                match event {
-                    DeviceManagerEvent::PairingRequest(request) => {
-                        // Capture original request_id as a Rust String
-                        let request_id_str = request.request_id.clone();
-                        unsafe {
-                            if let Some(callback) = PAIRING_REQUEST_CALLBACK {
-                                let device_id = to_c_string(&request.device_id);
-                                let device_name = to_c_string(&request.device_name);
-                                let ip_address = to_c_string(&request.ip_address);
-                                let request_id_c = to_c_string(&request.request_id);
-                                
-                                let result = callback(
-                                    device_id,
-                                    device_name,
-                                    ip_address,
-                                    request.port as c_int,
-                                    request_id_c,
-                                );
-                                
-                                // Free C strings
-                                let _ = CString::from_raw(device_id as *mut c_char);
-                                let _ = CString::from_raw(device_name as *mut c_char);
-                                let _ = CString::from_raw(ip_address as *mut c_char);
-                                let _ = CString::from_raw(request_id_c as *mut c_char);
-                                
-                                let accepted = result > 0;
-                                // Removed event_tx handling since 'event_tx' field is not present in PairingRequest.
-                                info!("Pairing response for request_id {}: accepted = {}", request_id_str, accepted);
-                            }
-                        }
-                    }
-                    DeviceManagerEvent::PairingResponse(request_id, accepted) => {
-                        // Forward this to the network service
-                        if let Some(tx) = NETWORK_TX.get() {
-                            tx.send(NetworkCommand::HandleDeviceEvent(
-                                DeviceManagerEvent::PairingResponse(request_id.clone(), accepted)
-                            )).await.unwrap_or_else(|e| {
-                                error!("Failed to forward pairing response: {}", e);
-                            });
-                        }
-                    },
-                    DeviceManagerEvent::DeviceAdded(device) => {
-                        unsafe {
-                            if let Some(callback) = DEVICE_ADDED_CALLBACK {
-                                let device_id = to_c_string(&device.device_id);
-                                let device_name = to_c_string(&device.device_name);
-                                let ip_address = to_c_string(&device.ip_address);
-                                
-                                callback(
-                                    device_id,
-                                    device_name,
-                                    ip_address,
-                                    device.port as c_int,
-                                );
-                                
-                                // Free C strings
-                                let _ = CString::from_raw(device_id as *mut c_char);
-                                let _ = CString::from_raw(device_name as *mut c_char);
-                                let _ = CString::from_raw(ip_address as *mut c_char);
-                            }
-                        }
-                    }
-                    DeviceManagerEvent::DeviceRemoved(device_id) => {
-                        unsafe {
-                            if let Some(callback) = DEVICE_REMOVED_CALLBACK {
-                                let c_device_id = to_c_string(&device_id);
-                                callback(c_device_id);
-                                let _ = CString::from_raw(c_device_id as *mut c_char);
-                            }
-                        }
-                    }
-                    _ => {} // Handle other events as needed
-                }
-            }
-        });
-        
-        0
-    })
-}
-
-// Get local device ID
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_get_local_device_id() -> *const c_char {
-    let runtime = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => {
-            error!("Runtime not initialized");
-            return ptr::null();
-        }
-    };
-    
-    runtime.block_on(async {
-        // This would need to be implemented properly to access the device manager
-        // For now, return a placeholder
-        to_c_string("device_id_placeholder")
-    })
-}
-
-// Get local device name
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_get_local_device_name() -> *const c_char {
-    let runtime = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => {
-            error!("Runtime not initialized");
-            return ptr::null();
-        }
-    };
-    
-    runtime.block_on(async {
-        // This would need to be implemented properly to access the device manager
-        // For now, return a placeholder
-        to_c_string("device_name_placeholder")
-    })
-}
-
-// Get paired devices as JSON
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_get_paired_devices() -> *const c_char {
-    let runtime = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => {
-            error!("Runtime not initialized");
-            return ptr::null();
-        }
-    };
-    
-    runtime.block_on(async {
-        // This would need to be implemented properly to access the device manager
-        // For now, return an empty array
-        to_c_string("[]")
-    })
-}
-
-// Send pairing request
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_send_pairing_request(ip_address: *const c_char, port: c_int) -> c_int {
-    if ip_address.is_null() {
-        return -1;
-    }
-    
-    let ip = unsafe {
-        match CStr::from_ptr(ip_address).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => return -1,
-        }
-    };
-    
-    let port = port as u16;
-    
-    let runtime = match RUNTIME.get() {
-        Some(rt) => rt,
-        None => {
-            error!("Runtime not initialized");
-            return -1;
-        }
-    };
-    
-    let network_tx = match NETWORK_TX.get() {
-        Some(tx) => tx.clone(),
-        None => {
-            error!("Network sender not initialized");
-            return -1;
-        }
-    };
-    
-    runtime.block_on(async {
-        let (response_tx, response_rx) = oneshot::channel();
-        
-        if let Err(e) = network_tx.send(NetworkCommand::SendPairingRequest(ip, port, response_tx)).await {
-            error!("Failed to send pairing request: {}", e);
-            return -1;
-        }
-        
-        match response_rx.await {
-            Ok(true) => 1,  // Success
-            Ok(false) => 0, // Declined
-            Err(_) => -1,   // Error
-        }
-    })
-}
-
-// Remove paired device
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_remove_device(device_id: *const c_char) -> c_int {
-    if device_id.is_null() {
-        return -1;
-    }
-    
-    let id = unsafe {
-        match CStr::from_ptr(device_id).to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => return -1,
-        }
-    };
-    
-    // This would need to be implemented properly to access the device manager
-    // For now, return success
-    0
-}
-
-// Cleanup and shut down
-#[unsafe(no_mangle)]
-pub extern "C" fn openrelay_cleanup() {
-    // Clean up global state
-    if let Some(runtime) = RUNTIME.get() {
-        // Shut down the runtime
-        let _ = runtime;
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
-// Free a C string allocated by Rust
+/// Encrypt data with the given key
+/// 
+/// # Safety
+/// - The caller must call `encryption_free_buffer` on the returned pointer when done
+/// - The encrypted_size parameter will be set to the size of the encrypted data in bytes
+/// 
+/// Returns a pointer to the encrypted data buffer, or null on error
 #[unsafe(no_mangle)]
-pub extern "C" fn openrelay_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() {
+pub extern "C" fn encryption_encrypt(
+    data: *const u8,
+    data_size: usize,
+    key: *const u8,
+    key_size: usize,
+    encrypted_size: *mut usize,
+) -> *mut u8 {
+    // Validate parameters
+    if data.is_null() || key.is_null() || encrypted_size.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // Create slices from the input pointers
+    let data_slice = unsafe { slice::from_raw_parts(data, data_size) };
+    let key_slice = unsafe { slice::from_raw_parts(key, key_size) };
+
+    // Get the encryption service using the raw pointer approach for Rust 2024
+    let service = unsafe {
+        // Need to dereference the raw pointer first
+        let option_ref = &raw const ENCRYPTION_SERVICE;
+        match *option_ref {
+            Some(ref service) => service,
+            None => return std::ptr::null_mut(),
+        }
+    };
+
+    // Encrypt the data
+    match service.encrypt(data_slice, key_slice) {
+        Ok(encrypted) => {
+            let encrypted_len = encrypted.len();
+            let mut encrypted_buffer = Vec::with_capacity(encrypted_len);
+            encrypted_buffer.extend_from_slice(&encrypted);
+            
+            // Set the encrypted size
+            unsafe {
+                *encrypted_size = encrypted_len;
+            }
+            
+            // Transfer ownership to caller
+            let ptr = encrypted_buffer.as_mut_ptr();
+            std::mem::forget(encrypted_buffer);
+            ptr
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Decrypt data with the given key
+/// 
+/// # Safety
+/// - The caller must call `encryption_free_buffer` on the returned pointer when done
+/// - The decrypted_size parameter will be set to the size of the decrypted data in bytes
+/// 
+/// Returns a pointer to the decrypted data buffer, or null on error
+#[unsafe(no_mangle)]
+pub extern "C" fn encryption_decrypt(
+    encrypted_data: *const u8,
+    encrypted_size: usize,
+    key: *const u8,
+    key_size: usize,
+    decrypted_size: *mut usize,
+) -> *mut u8 {
+    // Validate parameters
+    if encrypted_data.is_null() || key.is_null() || decrypted_size.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // Create slices from the input pointers
+    let encrypted_slice = unsafe { slice::from_raw_parts(encrypted_data, encrypted_size) };
+    let key_slice = unsafe { slice::from_raw_parts(key, key_size) };
+
+    // Get the encryption service using the raw pointer approach for Rust 2024
+    let service = unsafe {
+        // Need to dereference the raw pointer first
+        let option_ref = &raw const ENCRYPTION_SERVICE;
+        match *option_ref {
+            Some(ref service) => service,
+            None => return std::ptr::null_mut(),
+        }
+    };
+
+    // Decrypt the data
+    match service.decrypt(encrypted_slice, key_slice) {
+        Ok(decrypted) => {
+            let decrypted_len = decrypted.len();
+            let mut decrypted_buffer = Vec::with_capacity(decrypted_len);
+            decrypted_buffer.extend_from_slice(&decrypted);
+            
+            // Set the decrypted size
+            unsafe {
+                *decrypted_size = decrypted_len;
+            }
+            
+            // Transfer ownership to caller
+            let ptr = decrypted_buffer.as_mut_ptr();
+            std::mem::forget(decrypted_buffer);
+            ptr
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Free a buffer allocated by the encryption functions
+/// 
+/// # Safety
+/// - The pointer must have been returned by one of the encryption functions
+/// - The pointer must not be used after this call
+#[unsafe(no_mangle)]
+pub extern "C" fn encryption_free_buffer(buffer: *mut u8, buffer_size: usize) {
+    if !buffer.is_null() && buffer_size > 0 {
         unsafe {
-            let _ = CString::from_raw(ptr);
+            Vec::from_raw_parts(buffer, buffer_size, buffer_size);
+            // Buffer is freed when it goes out of scope
         }
+    }
+}
+
+/// Cleanup and free all resources
+#[unsafe(no_mangle)]
+pub extern "C" fn encryption_cleanup() {
+    unsafe {
+        ENCRYPTION_SERVICE = None;
     }
 }

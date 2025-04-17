@@ -9,24 +9,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aes-gcm = "0.10.3"
-arboard = "3.5.0"
-base64 = "0.22.1"
-chrono = { version = "0.4.40", features = ["serde"] }
-dirs = "6.0.0"
-env_logger = "0.11.8"
-futures = "0.3.31"
-hostname = "0.4.1"
-libc = "0.2.171"
-libffi = "4.0.0"
-log = "0.4.27"
-mdns-sd = "0.13.6"
-once_cell = "1.21.3"
-rand = "0.9.0"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
 thiserror = "2.0.12"
-tokio = {version = "1.44.2", features = ["full"]}
-tokio-tungstenite = "0.26.2"
-tungstenite = "0.26.2"
-uuid = { version = "1.16.0", features = ["v4", "serde"] }
-winapi = { version = "0.3.9", features = ["winuser", "winbase", "wincon"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

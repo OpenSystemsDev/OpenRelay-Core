@@ -2,7 +2,6 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
-use base64::{engine::general_purpose, Engine as _};
 use thiserror::Error;
 
 pub const KEY_SIZE_BYTES: usize = 32; // 256 bits
@@ -24,21 +23,19 @@ impl EncryptionService {
         Self {}
     }
 
-    pub fn generate_shared_key(&self) -> String {
+    /// Generate a new random encryption key (32 bytes for AES-256)
+    pub fn generate_key() -> Result<Vec<u8>, EncryptionError> {
         let key = Aes256Gcm::generate_key(OsRng);
-        general_purpose::STANDARD.encode(key)
+        Ok(key.to_vec())
     }
 
-    pub fn encrypt_string(&self, plaintext: &str, base64_key: &str) -> Result<String, EncryptionError> {
-        if plaintext.is_empty() {
-            return Ok(String::new());
+    /// Encrypt data with the given key
+    pub fn encrypt(&self, data: &[u8], key_bytes: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        if data.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // Decode key from Base64
-        let key_bytes = general_purpose::STANDARD
-            .decode(base64_key)
-            .map_err(|e| EncryptionError::InvalidKey(e.to_string()))?;
-
+        // Validate key
         if key_bytes.len() != KEY_SIZE_BYTES {
             return Err(EncryptionError::InvalidKey(format!(
                 "Key must be {} bytes, but was {} bytes",
@@ -47,36 +44,34 @@ impl EncryptionService {
             )));
         }
 
-        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+        // Create cipher
+        let key = Key::<Aes256Gcm>::from_slice(key_bytes);
         let cipher = Aes256Gcm::new(key);
 
         // Generate a random nonce
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let nonce_bytes = nonce.as_slice();
 
-        let plaintext_bytes = plaintext.as_bytes();
+        // Encrypt the data
         let ciphertext = cipher
-            .encrypt(&nonce, plaintext_bytes)
+            .encrypt(&nonce, data)
             .map_err(|e| EncryptionError::Encryption(e.to_string()))?;
 
-        // Combine nonce and ciphertext and encode as Base64
+        // Combine nonce and ciphertext
         let mut result = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
         result.extend_from_slice(nonce_bytes);
         result.extend_from_slice(&ciphertext);
 
-        Ok(general_purpose::STANDARD.encode(result))
+        Ok(result)
     }
 
-    pub fn decrypt_string(&self, base64_ciphertext: &str, base64_key: &str) -> Result<String, EncryptionError> {
-        if base64_ciphertext.is_empty() {
-            return Ok(String::new());
+    /// Decrypt data with the given key
+    pub fn decrypt(&self, encrypted_data: &[u8], key_bytes: &[u8]) -> Result<Vec<u8>, EncryptionError> {
+        if encrypted_data.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // Decode key from Base64
-        let key_bytes = general_purpose::STANDARD
-            .decode(base64_key)
-            .map_err(|e| EncryptionError::InvalidKey(e.to_string()))?;
-
+        // Validate key
         if key_bytes.len() != KEY_SIZE_BYTES {
             return Err(EncryptionError::InvalidKey(format!(
                 "Key must be {} bytes, but was {} bytes",
@@ -85,41 +80,27 @@ impl EncryptionService {
             )));
         }
 
-        // Decode ciphertext from Base64
-        let combined = general_purpose::STANDARD
-            .decode(base64_ciphertext)
-            .map_err(|e| EncryptionError::Decryption(e.to_string()))?;
-
-        if combined.len() <= 12 {
+        // Validate encrypted data length
+        if encrypted_data.len() <= 12 {
             return Err(EncryptionError::Decryption(
-                "Ciphertext too short".to_string(),
+                "Encrypted data too short".to_string(),
             ));
         }
 
         // Split nonce and ciphertext
-        let nonce_bytes = &combined[..12]; // AES-GCM nonce is 12 bytes
-        let ciphertext = &combined[12..];
+        let nonce_bytes = &encrypted_data[..12]; // AES-GCM nonce is 12 bytes
+        let ciphertext = &encrypted_data[12..];
 
-        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+        // Create cipher
+        let key = Key::<Aes256Gcm>::from_slice(key_bytes);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
 
+        // Decrypt the data
         let plaintext = cipher
             .decrypt(nonce, ciphertext)
             .map_err(|e| EncryptionError::Decryption(e.to_string()))?;
 
-        String::from_utf8(plaintext).map_err(|e| EncryptionError::Decryption(e.to_string()))
-    }
-
-    pub fn encrypt_binary(&self, data: &[u8], base64_key: &str) -> Result<String, EncryptionError> {
-        let base64_data = general_purpose::STANDARD.encode(data);
-        self.encrypt_string(&base64_data, base64_key)
-    }
-
-    pub fn decrypt_binary(&self, base64_ciphertext: &str, base64_key: &str) -> Result<Vec<u8>, EncryptionError> {
-        let base64_data = self.decrypt_string(base64_ciphertext, base64_key)?;
-        general_purpose::STANDARD
-            .decode(base64_data)
-            .map_err(|e| EncryptionError::Decryption(e.to_string()))
+        Ok(plaintext)
     }
 }
