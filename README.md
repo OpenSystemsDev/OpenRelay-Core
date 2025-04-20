@@ -15,9 +15,9 @@ OpenRelay-core functions as a key management system and secure data storage plat
 
 ## Security
 - All clipboard data is encrypted with AES-256-GCM (NIST SP 800-38D)
-- Uses FIPS 140-3 certified cryptographic algorithms.
+- Uses FIPS 140-3 certified cryptographic algorithms
 - Follows OWASP Cryptographic Storage Cheat Sheet recommendations
-- Keys automatically rotate every 7 days (following NIST SP 800-57 guidelines with 7-day cycles) and secure key recovery mechanisms ensure your keys are always protected and manageable.
+- Keys automatically rotate every 7 days (following NIST SP 800-57 guidelines with 7-day cycles) ensuring your keys are always protected
 
 ## Building from source
 
