@@ -1,19 +1,16 @@
 use crate::encryption::EncryptionService;
-use crate::keychain::{KeyChain, KeyEntry, KeyUpdatePackage};
+use crate::keychain::{KeyChain, KeyEntry};
 use crate::secure_storage::{SecureStorage, SecureDeviceStorage, DeviceInfo};
 use std::slice;
-use std::sync::{Arc, RwLock, Mutex};
-use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+use std::ptr;
 
-// Global instances
 static mut ENCRYPTION_SERVICE: Option<Arc<EncryptionService>> = None;
 static mut KEYCHAIN: Option<Arc<RwLock<KeyChain>>> = None;
 static mut SECURE_STORAGE: Option<Arc<SecureStorage>> = None;
 static mut DEVICE_STORAGE: Option<Arc<SecureDeviceStorage>> = None;
 
 /// Initialize the encryption service
-///
-/// Returns 0 on success, non-zero on error
 #[unsafe(no_mangle)]
 pub extern "C" fn encryption_init() -> i32 {
     unsafe {
@@ -24,13 +21,13 @@ pub extern "C" fn encryption_init() -> i32 {
         KEYCHAIN = Some(Arc::new(RwLock::new(keychain)));
 
         // Initialize master key for secure storage
-        // In a real implementation, this would be loaded from a secure location
-        if let Some(service_ref) = &ENCRYPTION_SERVICE {
+        let encryption_service_ptr = &raw const ENCRYPTION_SERVICE;
+        if let Some(service_ref) = ptr::read(encryption_service_ptr) {
             match EncryptionService::generate_key() {
                 Ok(master_key) => {
                     let storage = SecureStorage::new(service_ref.clone(), master_key);
-                    SECURE_STORAGE = Some(Arc::new(storage));
-
+                    SECURE_STORAGE = Some(Arc::new(storage.clone()));
+                    
                     let device_storage = SecureDeviceStorage::new(storage);
                     DEVICE_STORAGE = Some(Arc::new(device_storage));
                 }
@@ -41,15 +38,7 @@ pub extern "C" fn encryption_init() -> i32 {
     0
 }
 
-// Existing functions...
-
 /// Generate a new encryption key
-///
-/// # Safety
-/// - The caller must call `encryption_free_buffer` on the returned pointer when done
-/// - The key_size parameter will be set to the size of the key in bytes
-///
-/// Returns a pointer to the key buffer, or null on error
 #[unsafe(no_mangle)]
 pub extern "C" fn encryption_generate_key(key_size: *mut usize) -> *mut u8 {
     if key_size.is_null() {
@@ -57,13 +46,7 @@ pub extern "C" fn encryption_generate_key(key_size: *mut usize) -> *mut u8 {
     }
 
     // Generate a new key
-    let key_result = unsafe {
-        if let Some(_service) = &ENCRYPTION_SERVICE {
-            EncryptionService::generate_key()
-        } else {
-            return std::ptr::null_mut();
-        }
-    };
+    let key_result = EncryptionService::generate_key();
 
     match key_result {
         Ok(key) => {
@@ -87,12 +70,6 @@ pub extern "C" fn encryption_generate_key(key_size: *mut usize) -> *mut u8 {
 }
 
 /// Encrypt data with the given key
-///
-/// # Safety
-/// - The caller must call `encryption_free_buffer` on the returned pointer when done
-/// - The encrypted_size parameter will be set to the size of the encrypted data in bytes
-///
-/// Returns a pointer to the encrypted data buffer, or null on error
 #[unsafe(no_mangle)]
 pub extern "C" fn encryption_encrypt(
     data: *const u8,
@@ -101,7 +78,7 @@ pub extern "C" fn encryption_encrypt(
     key_size: usize,
     encrypted_size: *mut usize,
 ) -> *mut u8 {
-    // Validate parameters
+    // Ensure params are valid
     if data.is_null() || key.is_null() || encrypted_size.is_null() {
         return std::ptr::null_mut();
     }
@@ -112,7 +89,8 @@ pub extern "C" fn encryption_encrypt(
 
     // Get the encryption service
     let service = unsafe {
-        if let Some(service) = &ENCRYPTION_SERVICE {
+        let encryption_service_ptr = &raw const ENCRYPTION_SERVICE;
+        if let Some(service) = ptr::read(encryption_service_ptr) {
             service
         } else {
             return std::ptr::null_mut();
@@ -126,7 +104,6 @@ pub extern "C" fn encryption_encrypt(
             let mut encrypted_buffer = Vec::with_capacity(encrypted_len);
             encrypted_buffer.extend_from_slice(&encrypted);
 
-            // Set the encrypted size
             unsafe {
                 *encrypted_size = encrypted_len;
             }
@@ -141,12 +118,6 @@ pub extern "C" fn encryption_encrypt(
 }
 
 /// Decrypt data with the given key
-///
-/// # Safety
-/// - The caller must call `encryption_free_buffer` on the returned pointer when done
-/// - The decrypted_size parameter will be set to the size of the decrypted data in bytes
-///
-/// Returns a pointer to the decrypted data buffer, or null on error
 #[unsafe(no_mangle)]
 pub extern "C" fn encryption_decrypt(
     encrypted_data: *const u8,
@@ -155,7 +126,7 @@ pub extern "C" fn encryption_decrypt(
     key_size: usize,
     decrypted_size: *mut usize,
 ) -> *mut u8 {
-    // Validate parameters
+    // Ensure params are valid
     if encrypted_data.is_null() || key.is_null() || decrypted_size.is_null() {
         return std::ptr::null_mut();
     }
@@ -166,7 +137,8 @@ pub extern "C" fn encryption_decrypt(
 
     // Get the encryption service
     let service = unsafe {
-        if let Some(service) = &ENCRYPTION_SERVICE {
+        let encryption_service_ptr = &raw const ENCRYPTION_SERVICE;
+        if let Some(service) = ptr::read(encryption_service_ptr) {
             service
         } else {
             return std::ptr::null_mut();
@@ -180,7 +152,6 @@ pub extern "C" fn encryption_decrypt(
             let mut decrypted_buffer = Vec::with_capacity(decrypted_len);
             decrypted_buffer.extend_from_slice(&decrypted);
 
-            // Set the decrypted size
             unsafe {
                 *decrypted_size = decrypted_len;
             }
@@ -195,10 +166,6 @@ pub extern "C" fn encryption_decrypt(
 }
 
 /// Free a buffer allocated by the encryption functions
-///
-/// # Safety
-/// - The pointer must have been returned by one of the encryption functions
-/// - The pointer must not be used after this call
 #[unsafe(no_mangle)]
 pub extern "C" fn encryption_free_buffer(buffer: *mut u8, buffer_size: usize) {
     if !buffer.is_null() && buffer_size > 0 {
@@ -224,7 +191,8 @@ pub extern "C" fn encryption_cleanup() {
 #[unsafe(no_mangle)]
 pub extern "C" fn get_current_key_id() -> u32 {
     unsafe {
-        if let Some(keychain) = &KEYCHAIN {
+        let keychain_ptr = &raw const KEYCHAIN;
+        if let Some(keychain) = ptr::read(keychain_ptr) {
             if let Ok(keychain_read) = keychain.read() {
                 return keychain_read.get_current_key_id();
             }
@@ -237,7 +205,8 @@ pub extern "C" fn get_current_key_id() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn should_rotate_key() -> bool {
     unsafe {
-        if let Some(keychain) = &KEYCHAIN {
+        let keychain_ptr = &raw const KEYCHAIN;
+        if let Some(keychain) = ptr::read(keychain_ptr) {
             if let Ok(keychain_read) = keychain.read() {
                 return keychain_read.should_rotate_current_key();
             }
@@ -247,11 +216,11 @@ pub extern "C" fn should_rotate_key() -> bool {
 }
 
 /// Create a new rotation key
-/// Returns the new key ID, or 0 on error
 #[unsafe(no_mangle)]
 pub extern "C" fn create_rotation_key() -> u32 {
     unsafe {
-        if let Some(keychain) = &KEYCHAIN {
+        let keychain_ptr = &raw const KEYCHAIN;
+        if let Some(keychain) = ptr::read(keychain_ptr) {
             if let Ok(mut keychain_write) = keychain.write() {
                 if let Ok(key_id) = keychain_write.add_rotation_key() {
                     return key_id;
@@ -266,7 +235,8 @@ pub extern "C" fn create_rotation_key() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn is_key_expired(key_id: u32) -> bool {
     unsafe {
-        if let Some(keychain) = &KEYCHAIN {
+        let keychain_ptr = &raw const KEYCHAIN;
+        if let Some(keychain) = ptr::read(keychain_ptr) {
             if let Ok(keychain_read) = keychain.read() {
                 return keychain_read.is_key_expired(key_id);
             }
@@ -276,8 +246,6 @@ pub extern "C" fn is_key_expired(key_id: u32) -> bool {
 }
 
 /// Get a key update package
-/// Returns true if package is available, false if reauth is needed
-/// Caller must free output_buffer with encryption_free_buffer
 #[unsafe(no_mangle)]
 pub extern "C" fn get_key_update_package(
     last_known_id: u32,
@@ -289,16 +257,14 @@ pub extern "C" fn get_key_update_package(
     }
 
     unsafe {
-        if let Some(keychain) = &KEYCHAIN {
+        let keychain_ptr = &raw const KEYCHAIN;
+        if let Some(keychain) = ptr::read(keychain_ptr) {
             if let Ok(keychain_read) = keychain.read() {
                 if let Some(package) = keychain_read.get_key_update_package(last_known_id) {
-                    // Serialize the package (simplified - in real implementation use serde)
                     let mut data = Vec::new();
 
-                    // Add current key ID
                     data.extend_from_slice(&package.current_key_id.to_le_bytes());
 
-                    // Add number of keys
                     let num_keys = package.keys.len() as u32;
                     data.extend_from_slice(&num_keys.to_le_bytes());
 
@@ -313,7 +279,6 @@ pub extern "C" fn get_key_update_package(
                         data.extend_from_slice(&entry.key);
                     }
 
-                    // Set output
                     *output_size = data.len();
                     let ptr = data.as_mut_ptr();
                     *output_buffer = ptr;
@@ -328,7 +293,6 @@ pub extern "C" fn get_key_update_package(
 }
 
 /// Import a key update package
-/// Returns the current key ID, or 0 on error
 #[unsafe(no_mangle)]
 pub extern "C" fn import_key_update_package(
     data: *const u8,
@@ -341,26 +305,26 @@ pub extern "C" fn import_key_update_package(
     unsafe {
         let data_slice = std::slice::from_raw_parts(data, data_len);
 
-        // Simplified deserialization
         if data_len < 8 {
             return 0;
         }
 
         let mut pos = 0;
 
-        // Read current key ID
+        // Key ID
         let mut id_bytes = [0u8; 4];
         id_bytes.copy_from_slice(&data_slice[pos..pos+4]);
         let current_key_id = u32::from_le_bytes(id_bytes);
         pos += 4;
 
-        // Read number of keys
+        // Number of keys
         let mut num_keys_bytes = [0u8; 4];
         num_keys_bytes.copy_from_slice(&data_slice[pos..pos+4]);
         let num_keys = u32::from_le_bytes(num_keys_bytes);
         pos += 4;
 
-        if let Some(keychain) = &KEYCHAIN {
+        let keychain_ptr = &raw const KEYCHAIN;
+        if let Some(keychain) = ptr::read(keychain_ptr) {
             if let Ok(mut keychain_write) = keychain.write() {
                 for _ in 0..num_keys {
                     if pos + 20 > data_len { // 4 bytes ID + 8 bytes gen time + 8 bytes expiry time = 20
@@ -407,7 +371,6 @@ pub extern "C" fn import_key_update_package(
                     });
                 }
 
-                // Update current key ID using the public setter
                 keychain_write.set_current_key_id(current_key_id);
 
                 return current_key_id;
@@ -419,7 +382,6 @@ pub extern "C" fn import_key_update_package(
 }
 
 /// Securely store device info
-/// Returns true on success, false on error
 #[unsafe(no_mangle)]
 pub extern "C" fn securely_store_device_info(
     device_id: *const u8,
@@ -443,7 +405,6 @@ pub extern "C" fn securely_store_device_info(
         let device_name_slice = std::slice::from_raw_parts(device_name, device_name_len);
         let shared_key_slice = std::slice::from_raw_parts(shared_key, shared_key_len);
 
-        // Convert to strings
         let device_id_str = match std::str::from_utf8(device_id_slice) {
             Ok(s) => s.to_string(),
             Err(_) => return false,
@@ -454,7 +415,6 @@ pub extern "C" fn securely_store_device_info(
             Err(_) => return false,
         };
 
-        // Create device info
         let device_info = DeviceInfo {
             device_id: device_id_str,
             device_name: device_name_str,
@@ -463,7 +423,8 @@ pub extern "C" fn securely_store_device_info(
         };
 
         // Encrypt the device info
-        if let Some(device_storage) = &DEVICE_STORAGE {
+        let device_storage_ptr = &raw const DEVICE_STORAGE;
+        if let Some(device_storage) = ptr::read(device_storage_ptr) {
             match device_storage.encrypt_device_info(&device_info) {
                 Ok(encrypted) => {
                     // Set output
@@ -485,7 +446,6 @@ pub extern "C" fn securely_store_device_info(
 }
 
 /// Securely retrieve device info
-/// Returns true on success, false on error
 #[unsafe(no_mangle)]
 pub extern "C" fn securely_retrieve_device_info(
     encrypted_data: *const u8,
@@ -509,7 +469,8 @@ pub extern "C" fn securely_retrieve_device_info(
         let encrypted_slice = std::slice::from_raw_parts(encrypted_data, encrypted_data_len);
 
         // Decrypt the device info
-        if let Some(device_storage) = &DEVICE_STORAGE {
+        let device_storage_ptr = &raw const DEVICE_STORAGE;
+        if let Some(device_storage) = ptr::read(device_storage_ptr) {
             match device_storage.decrypt_device_info(encrypted_slice) {
                 Ok(device_info) => {
                     // Set device ID

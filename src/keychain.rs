@@ -1,26 +1,26 @@
-use crate::encryption::{EncryptionService, EncryptionError, KEY_SIZE_BYTES};
+use crate::encryption::{EncryptionService, EncryptionError};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use std::sync::{RwLock, Arc};
+use std::sync::Arc;
 
-const MAX_KEY_AGE_DAYS: u64 = 14;  // Rotate keys every 14 days
-const MAX_OFFLINE_DAYS: u64 = 28;  // Re-auth after 28 days offline
+const MAX_KEY_AGE_DAYS: u64 = 7;  // Rotate keys every 7 days
+const MAX_OFFLINE_DAYS: u64 = 14;  // Require re-authentication after 14 days of a device being offline
 
 pub struct KeyEntry {
     pub key: Vec<u8>,
-    pub generated_time: u64,  // Unix timestamp
-    pub expiry_time: u64,     // Unix timestamp
+    pub generated_time: u64,
+    pub expiry_time: u64,
 }
 
 pub struct KeyChain {
-    current_key_id: u32, // This field is private
+    current_key_id: u32,
     pub keys: HashMap<u32, KeyEntry>,
     encryption_service: Arc<EncryptionService>,
 }
 
 pub struct KeyUpdatePackage {
     pub keys: HashMap<u32, KeyEntry>,
-    pub current_key_id: u32, // This field is public for the package struct
+    pub current_key_id: u32,
 }
 
 impl KeyChain {
@@ -52,18 +52,24 @@ impl KeyChain {
 
     pub fn add_rotation_key(&mut self) -> Result<u32, EncryptionError> {
         let key = EncryptionService::generate_key()?;
+        
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_secs();
+            
         let expiry = now + (MAX_KEY_AGE_DAYS * 24 * 60 * 60);
+        
         self.current_key_id += 1;
+        
         self.keys.insert(self.current_key_id, KeyEntry {
             key,
             generated_time: now,
             expiry_time: expiry,
         });
+        
         self.prune_old_keys();
+        
         Ok(self.current_key_id)
     }
 
@@ -72,7 +78,9 @@ impl KeyChain {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_secs();
+            
         let cutoff = now - (MAX_OFFLINE_DAYS * 24 * 60 * 60);
+        
         self.keys.retain(|key_id, entry| {
             *key_id == self.current_key_id || entry.generated_time >= cutoff
         });
@@ -80,8 +88,9 @@ impl KeyChain {
 
     pub fn get_key_update_package(&self, last_known_id: u32) -> Option<KeyUpdatePackage> {
         if last_known_id < self.current_key_id.saturating_sub(4) {
-            return None;
+            return None; // Too old. Need to authenticate gain
         }
+        
         let mut update_keys = HashMap::new();
         for (&id, entry) in &self.keys {
             if id > last_known_id {
@@ -92,6 +101,8 @@ impl KeyChain {
                 });
             }
         }
+        
+        // Always include the current key
         if let Some(current_entry) = self.keys.get(&self.current_key_id) {
             update_keys.insert(self.current_key_id, KeyEntry {
                 key: current_entry.key.clone(),
@@ -99,6 +110,7 @@ impl KeyChain {
                 expiry_time: current_entry.expiry_time,
             });
         }
+        
         Some(KeyUpdatePackage {
             keys: update_keys,
             current_key_id: self.current_key_id,
@@ -111,9 +123,10 @@ impl KeyChain {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
                 .as_secs();
+                
             entry.expiry_time < now
         } else {
-            true
+            true // Key not found, consider it expired
         }
     }
 
@@ -123,9 +136,11 @@ impl KeyChain {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::from_secs(0))
                 .as_secs();
+            
+            // If key is older than MAX_KEY_AGE_DAYS indicating its expired
             (now - entry.generated_time) >= (MAX_KEY_AGE_DAYS * 24 * 60 * 60)
         } else {
-            true
+            true // No key currently, it should generate a new one
         }
     }
 }

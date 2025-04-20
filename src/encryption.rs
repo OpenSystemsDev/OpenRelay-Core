@@ -65,7 +65,7 @@ impl EncryptionService {
         Ok(result)
     }
 
-    /// Decrypt data with the given key
+    /// Decrypt data 
     pub fn decrypt(&self, encrypted_data: &[u8], key_bytes: &[u8]) -> Result<Vec<u8>, EncryptionError> {
         if encrypted_data.is_empty() {
             return Ok(Vec::new());
@@ -96,7 +96,7 @@ impl EncryptionService {
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        // Decrypt the data
+        // Decrypt data
         let plaintext = cipher
             .decrypt(nonce, ciphertext)
             .map_err(|e| EncryptionError::Decryption(e.to_string()))?;
