@@ -1,5 +1,5 @@
 use crate::encryption::EncryptionService;
-use crate::keychain::{KeyChain, KeyEntry};
+use crate::keychain::KeyChain;
 use crate::secure_storage::{SecureStorage, SecureDeviceStorage, DeviceInfo};
 use std::slice;
 use std::sync::{Arc, RwLock};
@@ -7,7 +7,7 @@ use std::ptr;
 
 static mut ENCRYPTION_SERVICE: Option<Arc<EncryptionService>> = None;
 static mut KEYCHAIN: Option<Arc<RwLock<KeyChain>>> = None;
-static mut SECURE_STORAGE: Option<Arc<SecureStorage>> = None;
+static mut SECURE_STORAGE: Option<Arc<SecureStorage>>   = None;
 static mut DEVICE_STORAGE: Option<Arc<SecureDeviceStorage>> = None;
 
 /// Initialize the encryption service
@@ -17,7 +17,7 @@ pub extern "C" fn encryption_init() -> i32 {
         let service = Arc::new(EncryptionService::new());
         ENCRYPTION_SERVICE = Some(service.clone());
 
-        let keychain = KeyChain::new(service.clone());
+        let keychain = KeyChain::new();
         KEYCHAIN = Some(Arc::new(RwLock::new(keychain)));
 
         // Initialize master key for secure storage
@@ -201,20 +201,6 @@ pub extern "C" fn get_current_key_id() -> u32 {
     }
 }
 
-/// Check if the current key should be rotated
-#[unsafe(no_mangle)]
-pub extern "C" fn should_rotate_key() -> bool {
-    unsafe {
-        let keychain_ptr = &raw const KEYCHAIN;
-        if let Some(keychain) = ptr::read(keychain_ptr) {
-            if let Ok(keychain_read) = keychain.read() {
-                return keychain_read.should_rotate_current_key();
-            }
-        }
-        false
-    }
-}
-
 /// Create a new rotation key
 #[unsafe(no_mangle)]
 pub extern "C" fn create_rotation_key() -> u32 {
@@ -227,156 +213,6 @@ pub extern "C" fn create_rotation_key() -> u32 {
                 }
             }
         }
-        0
-    }
-}
-
-/// Check if a key is expired
-#[unsafe(no_mangle)]
-pub extern "C" fn is_key_expired(key_id: u32) -> bool {
-    unsafe {
-        let keychain_ptr = &raw const KEYCHAIN;
-        if let Some(keychain) = ptr::read(keychain_ptr) {
-            if let Ok(keychain_read) = keychain.read() {
-                return keychain_read.is_key_expired(key_id);
-            }
-        }
-        true
-    }
-}
-
-/// Get a key update package
-#[unsafe(no_mangle)]
-pub extern "C" fn get_key_update_package(
-    last_known_id: u32,
-    output_buffer: *mut *mut u8,
-    output_size: *mut usize
-) -> bool {
-    if output_buffer.is_null() || output_size.is_null() {
-        return false;
-    }
-
-    unsafe {
-        let keychain_ptr = &raw const KEYCHAIN;
-        if let Some(keychain) = ptr::read(keychain_ptr) {
-            if let Ok(keychain_read) = keychain.read() {
-                if let Some(package) = keychain_read.get_key_update_package(last_known_id) {
-                    let mut data = Vec::new();
-
-                    data.extend_from_slice(&package.current_key_id.to_le_bytes());
-
-                    let num_keys = package.keys.len() as u32;
-                    data.extend_from_slice(&num_keys.to_le_bytes());
-
-                    // Add each key
-                    for (&id, entry) in &package.keys {
-                        data.extend_from_slice(&id.to_le_bytes());
-                        data.extend_from_slice(&entry.generated_time.to_le_bytes());
-                        data.extend_from_slice(&entry.expiry_time.to_le_bytes());
-
-                        let key_len = entry.key.len() as u32;
-                        data.extend_from_slice(&key_len.to_le_bytes());
-                        data.extend_from_slice(&entry.key);
-                    }
-
-                    *output_size = data.len();
-                    let ptr = data.as_mut_ptr();
-                    *output_buffer = ptr;
-                    std::mem::forget(data);
-
-                    return true;
-                }
-            }
-        }
-        false
-    }
-}
-
-/// Import a key update package
-#[unsafe(no_mangle)]
-pub extern "C" fn import_key_update_package(
-    data: *const u8,
-    data_len: usize
-) -> u32 {
-    if data.is_null() || data_len == 0 {
-        return 0;
-    }
-
-    unsafe {
-        let data_slice = std::slice::from_raw_parts(data, data_len);
-
-        if data_len < 8 {
-            return 0;
-        }
-
-        let mut pos = 0;
-
-        // Key ID
-        let mut id_bytes = [0u8; 4];
-        id_bytes.copy_from_slice(&data_slice[pos..pos+4]);
-        let current_key_id = u32::from_le_bytes(id_bytes);
-        pos += 4;
-
-        // Number of keys
-        let mut num_keys_bytes = [0u8; 4];
-        num_keys_bytes.copy_from_slice(&data_slice[pos..pos+4]);
-        let num_keys = u32::from_le_bytes(num_keys_bytes);
-        pos += 4;
-
-        let keychain_ptr = &raw const KEYCHAIN;
-        if let Some(keychain) = ptr::read(keychain_ptr) {
-            if let Ok(mut keychain_write) = keychain.write() {
-                for _ in 0..num_keys {
-                    if pos + 20 > data_len { // 4 bytes ID + 8 bytes gen time + 8 bytes expiry time = 20
-                        break; // Prevent reading past the end
-                    }
-
-                    // Read key ID
-                    let mut id_bytes = [0u8; 4];
-                    id_bytes.copy_from_slice(&data_slice[pos..pos+4]);
-                    let key_id = u32::from_le_bytes(id_bytes);
-                    pos += 4;
-
-                    // Read generated time
-                    let mut gen_bytes = [0u8; 8];
-                    gen_bytes.copy_from_slice(&data_slice[pos..pos+8]);
-                    let generated_time = u64::from_le_bytes(gen_bytes);
-                    pos += 8;
-
-                    // Read expiry time
-                    let mut exp_bytes = [0u8; 8];
-                    exp_bytes.copy_from_slice(&data_slice[pos..pos+8]);
-                    let expiry_time = u64::from_le_bytes(exp_bytes);
-                    pos += 8;
-
-                    // Read key length
-                    let mut key_len_bytes = [0u8; 4];
-                    key_len_bytes.copy_from_slice(&data_slice[pos..pos+4]);
-                    let key_len = u32::from_le_bytes(key_len_bytes) as usize;
-                    pos += 4;
-
-                    if pos + key_len > data_len {
-                        break; // Prevent reading past the end
-                    }
-
-                    // Read key
-                    let key = data_slice[pos..pos+key_len].to_vec();
-                    pos += key_len;
-
-                    // Add key to keychain
-                    keychain_write.keys.insert(key_id, KeyEntry {
-                        key,
-                        generated_time,
-                        expiry_time,
-                    });
-                }
-
-                keychain_write.set_current_key_id(current_key_id);
-
-                return current_key_id;
-            }
-        }
-
         0
     }
 }

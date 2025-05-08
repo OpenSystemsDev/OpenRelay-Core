@@ -23,7 +23,7 @@ impl EncryptionService {
         Self {}
     }
 
-    /// Generate a new random encryption key (32 bytes for AES-256)
+    /// Generate a new random encryption key
     pub fn generate_key() -> Result<Vec<u8>, EncryptionError> {
         let key = Aes256Gcm::generate_key(OsRng);
         Ok(key.to_vec())
@@ -88,7 +88,7 @@ impl EncryptionService {
         }
 
         // Split nonce and ciphertext
-        let nonce_bytes = &encrypted_data[..12]; // AES-GCM nonce is 12 bytes
+        let nonce_bytes = &encrypted_data[..12];
         let ciphertext = &encrypted_data[12..];
 
         // Create cipher

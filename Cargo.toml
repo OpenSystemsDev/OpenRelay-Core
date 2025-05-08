@@ -1,7 +1,9 @@
 [package]
 name = "openrelay_core"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 edition = "2024"
+authors = ["Awe03"]
+description = "The rust backend for OpenRelay"
 
 [lib]
 name = "openrelay_core"

@@ -5,16 +5,18 @@ This ismplemented in Rust for performance, memory safety, and cross-platform fun
 
 ## Overview
 
-OpenRelay-core functions as a key management system and secure data storage platform through its C foreign function interface that allows Openrelay to access it.
+OpenRelay-core serves as a key management system and secure data storage platform.
+OpenRelay accesses it through a C API.
 
 ## Features
 
-- Strong Encryption through AES-256-GCM enables the protection of all sensitive data.
-- Keys are randomly generated, rotated every 7 days, and stored securely
-- Built to work across platforms and ecosystems, on Windows, macOS, Linux, and Android
+- AES-256-GCM protection for all sensitive data
+- Secure random key generation using cryptographically secure random number generators
+- Fast, memory-safe implementation for cross-platform use
+- Built to work across platforms and ecosystems on Windows, macOS, Linux, and Android
 
 ## Security
-- All clipboard data is encrypted with AES-256-GCM (NIST SP 800-38D)
+- Data is encrypted with AES-256-GCM (NIST SP 800-38D)
 - Uses FIPS 140-3 certified cryptographic algorithms
 - Follows OWASP Cryptographic Storage Cheat Sheet recommendations
 - Keys automatically rotate every 7 days (following NIST SP 800-57 guidelines with 7-day cycles) ensuring your keys are always protected
@@ -34,30 +36,36 @@ The dll file can be found at:
 
 ## C API
 
-Through its C API interface the library makes available the following functions:
-
+The following functions are available using the Foreign Function Interface (FFI):
 - `encryption_init`: Initialize the encryption service
 - `encryption_generate_key`: Generate a new encryption key
 - `encryption_encrypt`: Encrypt data with a given key
-- `encryption_decrypt`: Decrypt data with a given key
+- `encryption_decrypt`: Decrypt data with a given key   
 - `encryption_free_buffer`: Free memory allocated by the library
 - `encryption_cleanup`: Clean up resources
 
 Key management and rotation:
 - `get_current_key_id`: Get the current encryption key ID
-- `should_rotate_key`: Check if the current key should be rotated
-- `create_rotation_key`: Create a new rotation key
-- `get_key_update_package`: Create a key update package
-- `import_key_update_package`: Import a key update package
+-  `create_rotation_key`: Create a new rotation key and make it the current one
+
+Secure Storage functions:
+- `securely_store_device_info`: Securely encrypt and store device information
+- `securely_retrieve_device_info`: Retrieve and decrypt device information
 
 ## Implementation Details
 
 OpenRelay-core uses:
-
 - The `aes-gcm` crate for AES-256-GCM encryption
 - The `rand` crate for secure random number generation
-- A secure key rotation system to maintain security over time
 - Proper memory management to avoid leaks
+
+## Devlog
+
+See [DEVLOG.md](/DEVLOG.md)
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
