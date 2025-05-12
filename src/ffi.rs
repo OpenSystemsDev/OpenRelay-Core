@@ -187,36 +187,6 @@ pub extern "C" fn encryption_cleanup() {
     }
 }
 
-/// Get the current key ID
-#[unsafe(no_mangle)]
-pub extern "C" fn get_current_key_id() -> u32 {
-    unsafe {
-        let keychain_ptr = &raw const KEYCHAIN;
-        if let Some(keychain) = ptr::read(keychain_ptr) {
-            if let Ok(keychain_read) = keychain.read() {
-                return keychain_read.get_current_key_id();
-            }
-        }
-        0
-    }
-}
-
-/// Create a new rotation key
-#[unsafe(no_mangle)]
-pub extern "C" fn create_rotation_key() -> u32 {
-    unsafe {
-        let keychain_ptr = &raw const KEYCHAIN;
-        if let Some(keychain) = ptr::read(keychain_ptr) {
-            if let Ok(mut keychain_write) = keychain.write() {
-                if let Ok(key_id) = keychain_write.add_rotation_key() {
-                    return key_id;
-                }
-            }
-        }
-        0
-    }
-}
-
 /// Securely store device info
 #[unsafe(no_mangle)]
 pub extern "C" fn securely_store_device_info(

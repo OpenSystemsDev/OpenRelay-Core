@@ -18,11 +18,6 @@ impl KeyChain {
         keychain
     }
 
-    /// Get the current key ID
-    pub fn get_current_key_id(&self) -> u32 {
-        self.current_key_id
-    }
-
     /// Add a new key and make it the current key
     pub fn add_rotation_key(&mut self) -> Result<u32, EncryptionError> {
         let key = EncryptionService::generate_key()?;

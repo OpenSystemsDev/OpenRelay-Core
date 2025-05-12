@@ -44,10 +44,6 @@ The following functions are available using the Foreign Function Interface (FFI)
 - `encryption_free_buffer`: Free memory allocated by the library
 - `encryption_cleanup`: Clean up resources
 
-Key management and rotation:
-- `get_current_key_id`: Get the current encryption key ID
--  `create_rotation_key`: Create a new rotation key and make it the current one
-
 Secure Storage functions:
 - `securely_store_device_info`: Securely encrypt and store device information
 - `securely_retrieve_device_info`: Retrieve and decrypt device information
